@@ -4,8 +4,6 @@ This project demonstrates the creation of a RESTful API for managing Todo items 
 
 The software allows users to create, read, update, and delete Todo items. Each Todo item includes a unique identifier, title, description, completion status, and timestamps for creation and last update. This project showcases the power of Rust in building efficient and safe web applications.
 
-[Software Demo Video](http://youtube.link.goes.here)
-
 # Development Environment
 
 - **Operating System:** Your OS (e.g., Ubuntu 20.04, Windows 10)
