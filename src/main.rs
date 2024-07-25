@@ -1,5 +1,5 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use mongodb::{Client, Database, bson::{doc, from_bson, to_bson}};
+use mongodb::{Client, Database, Collection, bson::{doc, Bson, from_bson, to_bson}};
 use std::{env, error::Error};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,16 +25,19 @@ async fn create_todo(
     todo: web::Json<Todo>,
     db: web::Data<Database>
 ) -> impl Responder {
-    let collection = db.collection("todos");
-
-    // Convert Json<Todo> to Todo
+    let collection: Collection<bson::Document> = db.collection("todos");
     let mut todo = todo.into_inner();
-    todo.id = Some(Uuid::new_v4()); // Generate a new UUID
+    todo.id = Some(Uuid::new_v4());
+    todo.created_at = Utc::now();
+    todo.updated_at = Utc::now();
+    let todo_doc = match to_bson(&todo) {
+        Ok(bson) => match bson.as_document() {
+            Some(doc) => doc.clone(),
+            None => return HttpResponse::InternalServerError().body("Failed to convert to BSON document"),
+        },
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to serialize todo: {}", e)),
+    };
 
-    // Create a BSON document from the Todo struct
-    let todo_doc = to_bson(&todo).unwrap().as_document().unwrap().clone();
-
-    // Insert the document into the "todos" collection
     match collection.insert_one(todo_doc, None).await {
         Ok(result) => HttpResponse::Ok().json(result),
         Err(e) => HttpResponse::InternalServerError().body(format!("Failed to insert todo: {}", e)),
@@ -42,18 +45,15 @@ async fn create_todo(
 }
 
 async fn get_todos(db: web::Data<Database>) -> impl Responder {
-    let collection = db.collection("todos");
-
-    // Find all documents in the "todos" collection
+    let collection: Collection<bson::Document> = db.collection("todos");
     let mut cursor = match collection.find(None, None).await {
         Ok(cursor) => cursor,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to execute find query: {}", e)),
     };
 
-    // Process the cursor asynchronously using StreamExt
     let mut todos = Vec::new();
     while let Some(result) = cursor.try_next().await.unwrap() {
-        match bson::from_document::<Todo>(result) {
+        match from_bson::<Todo>(Bson::Document(result)) {
             Ok(todo) => todos.push(todo),
             Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse todo: {}", e)),
         }
@@ -62,23 +62,57 @@ async fn get_todos(db: web::Data<Database>) -> impl Responder {
     HttpResponse::Ok().json(todos)
 }
 
+async fn update_todo(
+    id: web::Path<Uuid>,
+    updated_todo: web::Json<Todo>,
+    db: web::Data<Database>
+) -> impl Responder {
+    let collection: Collection<bson::Document> = db.collection("todos");
+    let filter = doc! { "_id": id.to_string() };
+    let mut updated_todo = updated_todo.into_inner();
+    updated_todo.updated_at = Utc::now();
+    let todo_doc = match to_bson(&updated_todo) {
+        Ok(bson) => match bson.as_document() {
+            Some(doc) => doc.clone(),
+            None => return HttpResponse::InternalServerError().body("Failed to convert to BSON document"),
+        },
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to serialize todo: {}", e)),
+    };
+    let update = doc! { "$set": todo_doc };
+
+    match collection.update_one(filter, update, None).await {
+        Ok(result) => HttpResponse::Ok().json(result),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to update todo: {}", e)),
+    }
+}
+
+async fn delete_todo(
+    id: web::Path<Uuid>,
+    db: web::Data<Database>
+) -> impl Responder {
+    let collection: Collection<bson::Document> = db.collection("todos");
+    let filter = doc! { "_id": id.to_string() };
+
+    match collection.delete_one(filter, None).await {
+        Ok(result) => HttpResponse::Ok().json(result),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to delete todo: {}", e)),
+    }
+}
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Load MongoDB URI from environment variable
     let client_uri = env::var("MONGODB_URI").expect("MONGODB_URI environment variable not set");
     let client = Client::with_uri_str(&client_uri).await?;
-
-    // Get the database "todos"
     let db = client.database("todos");
 
-    // Start Actix Web server
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(db.clone()))
             .route("/", web::get().to(index))
             .route("/todos", web::post().to(create_todo))
-            .route("/todos", web::get().to(get_todos)) // GET endpoint for todos
+            .route("/todos", web::get().to(get_todos))
+            .route("/todos/{id}", web::put().to(update_todo))
+            .route("/todos/{id}", web::delete().to(delete_todo))
     })
     .bind("127.0.0.1:8080")?
     .run()
